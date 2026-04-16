@@ -1,3 +1,4 @@
+import os
 import telebot
 from telebot import types
 import requests
@@ -5,8 +6,8 @@ import sqlite3
 import time
 
 # ================= НАСТРОЙКИ =================
-BOT_TOKEN = '8764944988:AAGgtR8fueiBlAIlnLjjCgze_wivbO4Pm20'
-ADMIN_ID = 8432377192  # ВАШ ТЕЛЕГРАМ ID (только цифры)
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+ADMIN_ID = int(os.getenv('ADMIN_ID'))
 # =============================================
 
 bot = telebot.TeleBot(BOT_TOKEN)
