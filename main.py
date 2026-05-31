@@ -4,95 +4,135 @@ import os
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandObject
+from aiogram.enums import ChatType
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# --- НАСТРОЙКИ ---
 TOKEN = os.getenv("BOT_TOKEN")
 
+if not TOKEN:
+    raise ValueError("BOT_TOKEN не установлен!")
+
 logging.basicConfig(level=logging.INFO)
-bot = Bot(token=TOKEN)
+
+bot = Bot(token=TOKEN, parse_mode="HTML")
 dp = Dispatcher()
 
-async def fetch_price(coin: str, vs_currency: str):
-    """Получает цену монеты к RUB или USDT"""
-    coin = coin.upper()
-    symbol = f"{coin}{vs_currency}"
-    url = f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={symbol}"
-    
+BINANCE_API = "https://api.binance.com/api/v3/ticker/price?symbol="
+
+# =====================================================
+
+async def fetch_price(symbol: str):
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url, timeout=5) as resp:
+            async with session.get(BINANCE_API + symbol) as resp:
+                if resp.status != 200:
+                    return None
                 data = await resp.json()
-                if data['retCode'] == 0 and data['result']['list']:
-                    return float(data['result']['list'][0]['lastPrice'])
+                return float(data["price"])
         except:
             return None
-    return None
 
-def get_coin_kb(coin: str):
-    """Создает кнопку Обновить"""
-    builder = InlineKeyboardBuilder()
-    # Сохраняем имя монеты в callback_data, чтобы бот знал что обновлять
-    builder.row(types.InlineKeyboardButton(text="🔄 Обновить", callback_data=f"upd_{coin}"))
-    return builder.as_markup()
+# =====================================================
 
-async def format_coin_message(coin: str):
-    """Форматирует текст сообщения с курсами"""
+async def get_prices(coin: str):
     coin = coin.upper()
-    price_rub = await fetch_price(coin, "RUB")
-    price_usd = await fetch_price(coin, "USDT")
 
-    if not price_usd:
-        return f"❌ Монета <b>{coin}</b> не найдена.", False
+    pairs = {
+        "USDT": f"{coin}USDT",
+        "RUB": f"{coin}RUB",
+        "BTC": f"{coin}BTC",
+        "ETH": f"{coin}ETH",
+    }
 
-    text = f"📊 <b>Курс {coin}</b>\n\n"
-    if price_rub:
-        text += f"💵 Цена в рублях: <code>{round(price_rub, 2)}₽</code>\n"
-    text += f"💵 Цена в долларах: <code>{round(price_usd, 4)}$</code>\n"
-    text += f"\n🕒 <i>Обновлено: {asyncio.get_event_loop().time()}</i>" # Для видимости обновления
-    
+    results = {}
+
+    for name, pair in pairs.items():
+        price = await fetch_price(pair)
+        if price:
+            results[name] = price
+
+    return results
+
+# =====================================================
+
+async def format_message(coin: str):
+    prices = await get_prices(coin)
+
+    if not prices:
+        return f"❌ Пара для <b>{coin}</b> не найдена на Binance.", False
+
+    text = f"📊 <b>{coin}</b> (Binance)\n\n"
+
+    signs = {
+        "USDT": "$",
+        "RUB": "₽",
+        "BTC": "BTC",
+        "ETH": "ETH"
+    }
+
+    for cur, value in prices.items():
+        text += f"💰 {cur}: <code>{value}</code> {signs.get(cur,'')}\n"
+
     return text, True
 
-# --- ОБРАБОТЧИКИ ---
+# =====================================================
+
+def get_keyboard(coin: str):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔄 Обновить", callback_data=f"upd_{coin}")
+    return builder.as_markup()
+
+# ======================= КОМАНДЫ ======================
 
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message):
+async def start_handler(message: types.Message):
     await message.answer(
-        "💎 <b>Крипто-Терминал 2026</b>\n\n"
-        "Используй команду: <code>/c монета</code>\n"
-        "Пример: <code>/c BTC</code> или <code>/c TON</code>",
-        parse_mode="HTML"
+        "💎 <b>Crypto Binance Bot</b>\n\n"
+        "Использование:\n"
+        "<code>/c BTC</code>\n"
+        "<code>/c ETH</code>\n\n"
+        "Можно использовать в группе ✅"
     )
 
 @dp.message(Command("c"))
-async def cmd_currency(message: types.Message, command: CommandObject):
+async def coin_handler(message: types.Message, command: CommandObject):
     if not command.args:
-        await message.answer("Введите символ монеты. Пример: <code>/c BTC</code>")
+        await message.reply("Пример: <code>/c BTC</code>")
         return
 
     coin = command.args.strip().upper()
-    text, success = await format_coin_message(coin)
-    
+
+    text, success = await format_message(coin)
+
     if success:
-        await message.answer(text, reply_markup=get_coin_kb(coin), parse_mode="HTML")
+        await message.reply(
+            text,
+            reply_markup=get_keyboard(coin)
+        )
     else:
-        await message.answer(text, parse_mode="HTML")
+        await message.reply(text)
+
+# =====================================================
 
 @dp.callback_query(F.data.startswith("upd_"))
-async def callback_update(callback: types.CallbackQuery):
-    # Достаем имя монеты из кнопки
+async def update_handler(callback: types.CallbackQuery):
     coin = callback.data.split("_")[1]
-    text, success = await format_coin_message(coin)
-    
-    try:
-        # Изменяем старое сообщение на новое
-        await callback.message.edit_text(text, reply_markup=get_coin_kb(coin), parse_mode="HTML")
-        await callback.answer("Данные обновлены!")
-    except Exception:
-        # Если цена не изменилась, телеграм выдаст ошибку, просто проигнорируем её
-        await callback.answer("Курс пока не изменился")
+
+    text, success = await format_message(coin)
+
+    if success:
+        await callback.message.edit_text(
+            text,
+            reply_markup=get_keyboard(coin)
+        )
+        await callback.answer("✅ Обновлено")
+    else:
+        await callback.answer("Ошибка")
+
+# =====================================================
 
 async def main():
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
