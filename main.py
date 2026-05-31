@@ -4,7 +4,6 @@ import os
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandObject
-from aiogram.enums import ChatType
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 TOKEN = os.getenv("BOT_TOKEN")
@@ -19,7 +18,11 @@ dp = Dispatcher()
 
 BINANCE_API = "https://api.binance.com/api/v3/ticker/price?symbol="
 
-# =====================================================
+SUPPORTED_FIAT = ["USD", "RUB", "EUR", "UAH", "KZT"]
+
+# ===============================================
+# Получение цены с Binance
+# ===============================================
 
 async def fetch_price(symbol: str):
     async with aiohttp.ClientSession() as session:
@@ -32,104 +35,153 @@ async def fetch_price(symbol: str):
         except:
             return None
 
-# =====================================================
+# ===============================================
+# Курс доллара ЦБ РФ
+# ===============================================
 
-async def get_prices(coin: str):
+async def get_usd_rate():
+    url = "https://www.cbr-xml-daily.ru/daily_json.js"
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            data = await resp.json()
+            return data["Valute"]["USD"]["Value"]
+
+# ===============================================
+# Формирование ответа
+# ===============================================
+
+async def get_crypto_price(coin: str, currency: str = None):
     coin = coin.upper()
-
-    pairs = {
-        "USDT": f"{coin}USDT",
-        "RUB": f"{coin}RUB",
-        "BTC": f"{coin}BTC",
-        "ETH": f"{coin}ETH",
-    }
 
     results = {}
 
-    for name, pair in pairs.items():
+    if currency and currency != "ALL":
+        currency = currency.upper()
+        if currency not in SUPPORTED_FIAT:
+            return None
+
+        pair = f"{coin}{currency}"
         price = await fetch_price(pair)
         if price:
-            results[name] = price
+            results[currency] = price
 
-    return results
+    else:
+        for cur in SUPPORTED_FIAT:
+            pair = f"{coin}{cur}"
+            price = await fetch_price(pair)
+            if price:
+                results[cur] = price
 
-# =====================================================
+    return results if results else None
 
-async def format_message(coin: str):
-    prices = await get_prices(coin)
+# ===============================================
+# Кнопка
+# ===============================================
 
-    if not prices:
-        return f"❌ Пара для <b>{coin}</b> не найдена на Binance.", False
-
-    text = f"📊 <b>{coin}</b> (Binance)\n\n"
-
-    signs = {
-        "USDT": "$",
-        "RUB": "₽",
-        "BTC": "BTC",
-        "ETH": "ETH"
-    }
-
-    for cur, value in prices.items():
-        text += f"💰 {cur}: <code>{value}</code> {signs.get(cur,'')}\n"
-
-    return text, True
-
-# =====================================================
-
-def get_keyboard(coin: str):
+def get_keyboard(coin: str, currency: str):
     builder = InlineKeyboardBuilder()
-    builder.button(text="🔄 Обновить", callback_data=f"upd_{coin}")
+    builder.button(
+        text="🔄 Обновить",
+        callback_data=f"upd_{coin}_{currency or 'ALL'}"
+    )
     return builder.as_markup()
 
-# ======================= КОМАНДЫ ======================
+# ===============================================
+# Команды
+# ===============================================
 
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
     await message.answer(
-        "💎 <b>Crypto Binance Bot</b>\n\n"
-        "Использование:\n"
+        "💎 <b>CryptoLive24</b>\n\n"
+        "Примеры:\n"
         "<code>/c BTC</code>\n"
-        "<code>/c ETH</code>\n\n"
-        "Можно использовать в группе ✅"
+        "<code>/c BTC RUB</code>\n"
+        "<code>/c ETH USD</code>\n"
+        "<code>/c TON ALL</code>\n\n"
+        "<code>/usd</code> — курс доллара ЦБ"
+    )
+
+@dp.message(Command("usd"))
+async def usd_handler(message: types.Message):
+    rate = await get_usd_rate()
+    await message.reply(
+        f"💵 <b>Курс доллара (ЦБ РФ)</b>\n\n"
+        f"<code>1 USD = {round(rate,2)} ₽</code>"
     )
 
 @dp.message(Command("c"))
-async def coin_handler(message: types.Message, command: CommandObject):
+async def crypto_handler(message: types.Message, command: CommandObject):
     if not command.args:
         await message.reply("Пример: <code>/c BTC</code>")
         return
 
-    coin = command.args.strip().upper()
+    args = command.args.split()
+    coin = args[0]
+    currency = args[1] if len(args) > 1 else None
 
-    text, success = await format_message(coin)
+    prices = await get_crypto_price(coin, currency)
 
-    if success:
-        await message.reply(
-            text,
-            reply_markup=get_keyboard(coin)
-        )
-    else:
-        await message.reply(text)
+    if not prices:
+        await message.reply("❌ Пара не найдена на Binance.")
+        return
 
-# =====================================================
+    text = f"📊 <b>{coin.upper()}</b> (Binance)\n\n"
+
+    symbols = {
+        "USD": "$",
+        "RUB": "₽",
+        "EUR": "€",
+        "UAH": "₴",
+        "KZT": "₸"
+    }
+
+    for cur, value in prices.items():
+        text += f"💰 {cur}: <code>{value}</code> {symbols.get(cur,'')}\n"
+
+    await message.reply(
+        text,
+        reply_markup=get_keyboard(coin.upper(), currency)
+    )
+
+# ===============================================
+# Обновление
+# ===============================================
 
 @dp.callback_query(F.data.startswith("upd_"))
 async def update_handler(callback: types.CallbackQuery):
-    coin = callback.data.split("_")[1]
+    _, coin, currency = callback.data.split("_")
 
-    text, success = await format_message(coin)
+    currency = None if currency == "ALL" else currency
 
-    if success:
-        await callback.message.edit_text(
-            text,
-            reply_markup=get_keyboard(coin)
-        )
-        await callback.answer("✅ Обновлено")
-    else:
-        await callback.answer("Ошибка")
+    prices = await get_crypto_price(coin, currency)
 
-# =====================================================
+    if not prices:
+        await callback.answer("Ошибка обновления")
+        return
+
+    text = f"📊 <b>{coin}</b> (Binance)\n\n"
+
+    symbols = {
+        "USD": "$",
+        "RUB": "₽",
+        "EUR": "€",
+        "UAH": "₴",
+        "KZT": "₸"
+    }
+
+    for cur, value in prices.items():
+        text += f"💰 {cur}: <code>{value}</code> {symbols.get(cur,'')}\n"
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_keyboard(coin, currency)
+    )
+
+    await callback.answer("✅ Обновлено")
+
+# ===============================================
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
