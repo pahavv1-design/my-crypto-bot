@@ -2,126 +2,107 @@ import asyncio
 import logging
 import os
 import aiohttp
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandObject
-from aiogram.types import ReplyKeyboardRemove, InlineQueryResultArticle, InputTextMessageContent
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.utils.markdown import hbold
+from aiogram.types import InlineQueryResultArticle, InputTextMessageContent
+from aiogram.types import ReplyKeyboardRemove
 
 TOKEN = os.getenv("BOT_TOKEN")
-
-if not TOKEN:
-    raise ValueError("BOT_TOKEN не установлен!")
 
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=TOKEN, parse_mode="HTML")
 dp = Dispatcher()
 
-BINANCE_API = "https://api.binance.com/api/v3/ticker/24hr?symbol="
+BINANCE_PRICE = "https://api.binance.com/api/v3/ticker/price?symbol="
+BINANCE_24H = "https://api.binance.com/api/v3/ticker/24hr?symbol="
+CBR_API = "https://www.cbr-xml-daily.ru/daily_json.js"
 
-SUPPORTED_FIAT = ["USDT", "RUB", "EUR", "UAH", "KZT"]
 
-# Автозамена тикеров
-TICKER_FIX = {
-    "TON": "TONCOIN"
-}
+# ================= BINANCE =================
 
-# ================= BINANCE ===================
-
-async def fetch_binance(symbol: str):
+async def get_binance_price(pair):
     async with aiohttp.ClientSession() as session:
-        async with session.get(BINANCE_API + symbol) as resp:
+        async with session.get(BINANCE_PRICE + pair) as resp:
+            if resp.status != 200:
+                return None
+            return float((await resp.json())["price"])
+
+
+async def get_binance_24h(pair):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(BINANCE_24H + pair) as resp:
             if resp.status != 200:
                 return None
             return await resp.json()
 
-async def get_crypto_data(coin: str, currency: str = "USDT"):
+
+# ================= ЦБ РФ =================
+
+async def get_usd_rub():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(CBR_API) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+            return float(data["Valute"]["USD"]["Value"])
+
+
+# ================= CRYPTO =================
+
+async def build_crypto_message(coin: str):
     coin = coin.upper()
-    coin = TICKER_FIX.get(coin, coin)
 
-    pair = f"{coin}{currency}"
+    pair = f"{coin}USDT"
 
-    data = await fetch_binance(pair)
+    data = await get_binance_24h(pair)
     if not data:
         return None
 
-    return {
-        "price": float(data["lastPrice"]),
-        "change": float(data["priceChangePercent"]),
-        "volume": float(data["quoteVolume"])
-    }
+    price_usdt = float(data["lastPrice"])
+    change = float(data["priceChangePercent"])
+    volume = float(data["quoteVolume"])
 
-# ================= ЦБ РФ ===================
+    usd_rub = await get_usd_rub()
+    price_rub = price_usdt * usd_rub if usd_rub else None
 
-async def get_cbr():
-    url = "https://www.cbr-xml-daily.ru/daily_json.js"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            if resp.status != 200:
-                return None
-            return await resp.json()
+    arrow = "🟢" if change >= 0 else "🔴"
 
-# ================= ФОРМАТ ===================
+    text = f"📊 <b>{coin}/USDT</b>\n\n"
+    text += f"💵 USD: <b>{round(price_usdt,2)} $</b>\n"
 
-def format_crypto(coin, currency, data):
-    sign = {
-        "USDT": "$",
-        "RUB": "₽",
-        "EUR": "€",
-        "UAH": "₴",
-        "KZT": "₸"
-    }.get(currency, "")
+    if price_rub:
+        text += f"💰 RUB: <b>{round(price_rub,2)} ₽</b>\n"
 
-    arrow = "🟢" if data["change"] >= 0 else "🔴"
+    text += f"{arrow} 24ч: <b>{change}%</b>\n"
+    text += f"📈 Объём: <code>{round(volume,2)}</code>\n"
 
-    text = (
-        f"📊 <b>{coin}/{currency}</b>\n\n"
-        f"💰 Цена: <code>{data['price']}</code> {sign}\n"
-        f"{arrow} 24ч: <b>{data['change']}%</b>\n"
-        f"📈 Объём: <code>{round(data['volume'],2)}</code>\n"
-    )
     return text
 
-# ================= КОМАНДЫ ===================
+
+# ================= КОМАНДЫ =================
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
         "🚀 <b>CryptoLive24 PRO</b>\n\n"
         "/c BTC\n"
-        "/c BTC RUB\n"
-        "/c BTC ALL\n\n"
-        "/usd\n"
-        "/rates\n\n"
-        "Inline режим:\n"
+        "/usd\n\n"
+        "Inline:\n"
         "@CryptoLive24_bot BTC",
         reply_markup=ReplyKeyboardRemove()
     )
 
+
 @dp.message(Command("usd"))
 async def usd(message: types.Message):
-    data = await get_cbr()
-    if not data:
+    rate = await get_usd_rub()
+    if not rate:
         await message.reply("Ошибка получения курса.")
         return
 
-    usd = data["Valute"]["USD"]["Value"]
-    await message.reply(f"💵 1 USD = <b>{round(usd,2)} ₽</b> (ЦБ РФ)")
+    await message.reply(f"💵 1 USD = <b>{round(rate,2)} ₽</b> (ЦБ РФ)")
 
-@dp.message(Command("rates"))
-async def rates(message: types.Message):
-    data = await get_cbr()
-    if not data:
-        await message.reply("Ошибка получения данных.")
-        return
-
-    text = "💱 <b>Курсы ЦБ РФ</b>\n\n"
-    for code in ["USD", "EUR", "CNY", "GBP"]:
-        value = data["Valute"][code]["Value"]
-        text += f"{code}: <b>{round(value,2)} ₽</b>\n"
-
-    await message.reply(text)
 
 @dp.message(Command("c"))
 async def crypto(message: types.Message, command: CommandObject):
@@ -129,54 +110,41 @@ async def crypto(message: types.Message, command: CommandObject):
         await message.reply("Пример: /c BTC")
         return
 
-    args = command.args.split()
-    coin = args[0].upper()
+    coin = command.args.strip().upper()
+    text = await build_crypto_message(coin)
 
-    if len(args) > 1 and args[1].upper() == "ALL":
-        text = ""
-        for cur in SUPPORTED_FIAT:
-            data = await get_crypto_data(coin, cur)
-            if data:
-                text += format_crypto(coin, cur, data) + "\n"
-        if not text:
-            await message.reply("Пара не найдена.")
-            return
-        await message.reply(text)
+    if not text:
+        await message.reply("❌ Монета не найдена на Binance.")
         return
 
-    currency = args[1].upper() if len(args) > 1 else "USDT"
+    await message.reply(text)
 
-    data = await get_crypto_data(coin, currency)
-    if not data:
-        await message.reply("❌ Пара не найдена на Binance.")
-        return
 
-    await message.reply(format_crypto(coin, currency, data))
-
-# ================= INLINE ===================
+# ================= INLINE =================
 
 @dp.inline_query()
 async def inline_handler(query: types.InlineQuery):
-    text = query.query.upper()
-    if not text:
+    coin = query.query.strip().upper()
+    if not coin:
         return
 
-    data = await get_crypto_data(text, "USDT")
-    if not data:
+    text = await build_crypto_message(coin)
+    if not text:
         return
 
     result = InlineQueryResultArticle(
         id="1",
-        title=f"{text} цена",
-        description=f"{data['price']} $",
+        title=f"{coin} цена",
+        description="Актуальный курс",
         input_message_content=InputTextMessageContent(
-            message_text=format_crypto(text, "USDT", data)
+            message_text=text
         )
     )
 
     await query.answer([result], cache_time=5)
 
-# ================= ЗАПУСК ===================
+
+# ================= ЗАПУСК =================
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
